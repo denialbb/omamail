@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtTest
 import "../../providers" as Providers
@@ -14,22 +15,33 @@ Item {
   QtObject {
     id: store
     property bool available: false
+    property string errorCode: "credential_store_unavailable"
     property string value: "app-password"
     property int lookups: 0
     function reset() {
       available = false
+      errorCode = "credential_store_unavailable"
       value = "app-password"
       lookups = 0
     }
     function credentialGet(kind, accountId, clientId, callback) {
       lookups++
       if (!available) {
-        callback("", "credential_store_unavailable")
+        callback("", errorCode)
         return true
       }
       callback(value, "")
       return true
     }
+    function credentialDelete(kind, accountId, clientId, callback) {
+      if (typeof callback === "function") callback(true, "")
+      return true
+    }
+  }
+
+  QtObject {
+    id: backendMock
+    property bool ready: false
   }
 
   Component {
@@ -39,6 +51,7 @@ Item {
       pluginDir: "/synthetic"
       platform: store
       accountId: "imap:one@example.org"
+      timeScale: 0.01
       settings: ({imapHost:"imap.example.org",imapPort:993,smtpHost:"smtp.example.org",
         smtpPort:465,username:"one@example.org",aliases:[],insecure:false})
     }
@@ -52,45 +65,76 @@ Item {
       platform: store
       accountId: "jmap:one@example.org"
       address: "one@example.org"
+      timeScale: 0.01
       settings: ({sessionUrl:"https://jmap.example.org/session",username:"one@example.org",
         authScheme:"basic",accountId:"one"})
     }
   }
 
+  Component {
+    id: imapWithBackendFactory
+
+    Providers.ImapAuth {
+      pluginDir: "/synthetic"
+      platform: store
+      backend: backendMock
+      accountId: "imap:delayed@example.org"
+      timeScale: 0.01
+      settings: ({imapHost:"imap.example.org",imapPort:993,smtpHost:"smtp.example.org",
+        smtpPort:465,username:"delayed@example.org",aliases:[],insecure:false})
+    }
+  }
+
+  SignalSpy { id: loginSpy; signalName: "loginSucceeded" }
+  SignalSpy { id: logoutSpy; signalName: "loggedOut" }
+
   TestCase {
     name: "CredentialStoreRetry"
 
-    function init() { store.reset() }
+    function init() {
+      store.reset()
+      backendMock.ready = false
+      loginSpy.target = null
+      loginSpy.clear()
+      logoutSpy.target = null
+      logoutSpy.clear()
+    }
 
     function test_an_unavailable_store_is_asked_again_by_an_imap_mailbox() {
       var auth = createTemporaryObject(imapFactory, root)
       verify(auth)
+      compare(auth.recoveringSession, true)
       auth.restoreSession()
       compare(store.lookups, 1)
       compare(auth.loggedIn, false)
+      compare(auth.recoveringSession, true)
       compare(auth.lastError, "The credential store is unavailable")
 
       // The store finishes starting, or the user unlocks it, before the
       // mailbox is looked at again.
       store.available = true
-      tryVerify(function() { return auth.loggedIn }, 8000)
+      tryVerify(function() { return auth.loggedIn }, 1000)
       verify(store.lookups >= 2)
       compare(auth.password, "app-password")
+      compare(auth.recoveringSession, false)
       compare(auth.secretRetryAttempt, 0)
     }
 
     function test_an_unavailable_store_is_asked_again_by_a_jmap_mailbox() {
       var auth = createTemporaryObject(jmapFactory, root)
       verify(auth)
+      compare(auth.recoveringSession, true)
       auth.restoreSession()
       compare(store.lookups, 1)
       compare(auth.loggedIn, false)
+      compare(auth.recoveringSession, true)
       compare(auth.lastError, "The credential store is unavailable")
 
       store.available = true
-      tryVerify(function() { return auth.loggedIn }, 8000)
+      tryVerify(function() { return auth.loggedIn }, 1000)
       verify(store.lookups >= 2)
       compare(auth.secret, "app-password")
+      compare(auth.recoveringSession, false)
       compare(auth.secretRetryAttempt, 0)
     }
 
@@ -105,6 +149,89 @@ Item {
       compare(auth.password, "")
       // No retry is scheduled: the answer will not change by itself.
       compare(auth.secretRetryAttempt, 0)
+      compare(auth.recoveringSession, false)
+    }
+
+    function test_permanent_error_is_not_retried() {
+      store.available = false
+      store.errorCode = "backend_needs_update"
+      var auth = createTemporaryObject(imapFactory, root)
+      verify(auth)
+      auth.restoreSession()
+      compare(store.lookups, 1)
+      compare(auth.loggedIn, false)
+      compare(auth.lastError, "backend_needs_update")
+      compare(auth.secretRetryAttempt, 0)
+      compare(auth.recoveringSession, false)
+    }
+
+    function test_logout_cancels_retry_timer_and_discards_subsequent_keyring_unlock() {
+      var auth = createTemporaryObject(imapFactory, root)
+      verify(auth)
+      loginSpy.target = auth
+      logoutSpy.target = auth
+
+      auth.restoreSession()
+      compare(store.lookups, 1)
+      compare(auth.loggedIn, false)
+      compare(auth.recoveringSession, true)
+      compare(auth.secretRetryAttempt, 1)
+
+      // User logs out while retry is active
+      auth.logout()
+      compare(logoutSpy.count, 1)
+      compare(auth.secretRetryAttempt, 0)
+      compare(auth.recoveringSession, false)
+      compare(auth.password, "")
+
+      // Keyring unlocks later
+      store.available = true
+      store.value = "stolen-password"
+      wait(150)
+
+      // The signed-out account must not be repopulated or emit loginSucceeded
+      compare(auth.loggedIn, false)
+      compare(auth.password, "")
+      compare(auth.recoveringSession, false)
+      compare(loginSpy.count, 0)
+    }
+
+    function test_in_flight_signin_prevents_retry_clobbering_error() {
+      var auth = createTemporaryObject(imapFactory, root)
+      verify(auth)
+      auth.restoreSession()
+      compare(auth.secretRetryAttempt, 1)
+      compare(auth.lastError, "The credential store is unavailable")
+
+      // Manual sign-in begins while retry timer is running
+      var started = auth.signIn("typed-password")
+      verify(started)
+      compare(auth.loginBusy, true)
+      compare(auth.lastError, "")
+
+      // Wait for timer to trigger while sign-in is busy; lastError must not be overwritten
+      wait(100)
+      compare(auth.loginBusy, true)
+      compare(auth.lastError, "")
+
+      // Server rejects the manual sign-in
+      auth.completeSignIn(false, "Server rejected password")
+      compare(auth.loginBusy, false)
+      compare(auth.lastError, "Server rejected password")
+    }
+
+    function test_backend_not_ready_delays_lookup_until_ready() {
+      backendMock.ready = false
+      var auth = createTemporaryObject(imapWithBackendFactory, root)
+      verify(auth)
+      auth.restoreSession()
+      // Backend was not ready: no lookup attempted yet, but restore is owed
+      compare(store.lookups, 0)
+      compare(auth.recoveringSession, true)
+
+      // Backend comes up
+      backendMock.ready = true
+      compare(store.lookups, 1)
     }
   }
 }

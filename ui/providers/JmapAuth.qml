@@ -64,6 +64,9 @@ Item {
 
   // The three names `MailAccount` reads without knowing which provider it has.
   readonly property bool credentialsPresent: configured
+  property bool restoreOwed: true
+  readonly property bool recoveringSession: !loggedIn && !loginBusy && configured && restoreOwed
+  property real timeScale: 1
   property bool loginBusy: false
   property bool credentialLookupBusy: false
   property bool credentialWriteBusy: false
@@ -175,9 +178,11 @@ Item {
 
   function restoreSession() {
     if (!configured) {
+      restoreOwed = false
       secretChecked = true
       return
     }
+    if (backend && !backend.ready) return
     if (credentialLookupBusy) return
     startSecretLookup()
   }
@@ -195,13 +200,14 @@ Item {
       if (serial !== root.credentialLookupSerial) return
       root.credentialLookupBusy = false
       if (boundAccount !== root.accountId) return
+      if (root.loginBusy) return
       root.handleSecretLookup(error ? "" : value, error)
     })
   }
 
   function scheduleSecretRetry() {
     if (!configured || credentialLookupBusy || secretRetry.running) return
-    secretRetry.interval = Secrets.retryDelay(secretRetryAttempt)
+    secretRetry.interval = Math.max(1, Math.round(Secrets.retryDelay(secretRetryAttempt) * timeScale))
     secretRetryAttempt++
     secretRetry.start()
   }
@@ -213,14 +219,23 @@ Item {
 
   Timer {
     id: secretRetry
-    onTriggered: if (!root.credentialLookupBusy) root.startSecretLookup()
+    onTriggered: {
+      if (root.loginBusy) {
+        secretRetry.interval = Math.max(1, Math.round(1000 * root.timeScale))
+        secretRetry.restart()
+        return
+      }
+      if (!root.credentialLookupBusy) root.startSecretLookup()
+    }
   }
 
   function handleSecretLookup(line, error) {
     if (lookupHandled) return
     lookupHandled = true
-    if (error && error !== "credential_missing") {
+    if (loginBusy) return
+    if (error === "credential_store_unavailable") {
       secretChecked = false
+      restoreOwed = true
       lastError = "The credential store is unavailable"
       finishWaiters(null, lastError)
       if (configured) sessionUnavailable(lastError)
@@ -231,6 +246,14 @@ Item {
       return
     }
     stopSecretRetry()
+    restoreOwed = false
+    if (error && error !== "credential_missing") {
+      secretChecked = false
+      lastError = safeError(error)
+      finishWaiters(null, lastError)
+      if (configured) sessionUnavailable(lastError)
+      return
+    }
     secretChecked = true
     var value = String(line || "")
     if (value === "") {
@@ -273,6 +296,7 @@ Item {
     }
     lastError = ""
     serverNeeded = false
+    credentialLookupSerial++
     loginBusy = true
     pendingSecret = typed
     verifyRequested(settings, address, typed)
@@ -296,6 +320,7 @@ Item {
       return
     }
     serverNeeded = false
+    restoreOwed = false
     sendingOffered = !result || result.canSend !== false
     secret = pendingSecret
     pendingSecret = ""
@@ -346,6 +371,12 @@ Item {
 
   function logout() {
     var boundAccount = accountId
+    cancelLogin()
+    stopSecretRetry()
+    restoreOwed = false
+    credentialLookupSerial++
+    credentialLookupBusy = false
+    finishWaiters(null, "Signed out")
     secret = ""
     pendingSecret = ""
     secretChecked = true
@@ -361,6 +392,7 @@ Item {
   // the same value.
   function invalidateAccessToken() {
     stopSecretRetry()
+    restoreOwed = false
     secret = ""
     secretChecked = false
   }
@@ -372,13 +404,16 @@ Item {
   function cancelLogin() {
     loginBusy = false
     progressStep = 0
+    pendingSecret = ""
   }
 
   onAccountIdChanged: {
     // A different mailbox has a different secret. Dropping the one in memory
     // is what stops an account rename from leaving the previous account's
     // credential in front of the new one's server.
+    cancelLogin()
     stopSecretRetry()
+    restoreOwed = true
     secret = ""
     secretChecked = false
     lookupHandled = false
@@ -387,6 +422,14 @@ Item {
     finishWaiters(null, "The mailbox changed before its credential was loaded")
     if (credentialWriteBusy && credentialWriteAccount !== "")
       pendingCredentialDelete = credentialWriteAccount
+  }
+
+  Connections {
+    target: root.backend
+    ignoreUnknownSignals: true
+    function onReadyChanged() {
+      if (root.backend && root.backend.ready === true) root.restoreSession()
+    }
   }
 
 }

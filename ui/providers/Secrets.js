@@ -1,5 +1,7 @@
 .pragma library
 
+.import "OAuth.js" as OAuth
+
 // What comes back from `secret-tool`, and what it is safe to change about it.
 //
 // A secret is bytes the user chose and the keyring stored, so the only thing
@@ -29,6 +31,5 @@ function fromKeyring(value) {
 // that a store which is simply not there costs one refused request per mailbox
 // every five minutes instead of a spin.
 function retryDelay(attempt) {
-  var count = Math.max(0, Math.floor(Number(attempt)) || 0)
-  return Math.min(300000, 5000 * Math.pow(2, count))
+  return OAuth.refreshRetryDelay(attempt)
 }
