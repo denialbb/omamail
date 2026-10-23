@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 
 import "ImapProtocol.js" as Imap
+import "Secrets.js" as Secrets
 
 // An IMAP account's sign-in, which is a server address and a password.
 //
@@ -76,6 +77,10 @@ Item {
   property var credentialWaiters: []
   property bool lookupHandled: false
   property string pendingPassword: ""
+  // Which retry comes next after the store said it was unavailable. The wait
+  // between attempts doubles; the attempts themselves do not stop, because
+  // the store can be unlocked at any point in the session.
+  property int secretRetryAttempt: 0
 
   signal loginSucceeded()
   signal loggedOut()
@@ -146,6 +151,23 @@ Item {
     })
   }
 
+  function scheduleSecretRetry() {
+    if (!configured || credentialLookupBusy || secretRetry.running) return
+    secretRetry.interval = Secrets.retryDelay(secretRetryAttempt)
+    secretRetryAttempt++
+    secretRetry.start()
+  }
+
+  function stopSecretRetry() {
+    secretRetry.stop()
+    secretRetryAttempt = 0
+  }
+
+  Timer {
+    id: secretRetry
+    onTriggered: if (!root.credentialLookupBusy) root.startSecretLookup()
+  }
+
   function handleSecretLookup(line, error) {
     if (lookupHandled) return
     lookupHandled = true
@@ -154,8 +176,13 @@ Item {
       lastError = "The credential store is unavailable"
       finishWaiters("", lastError)
       if (configured) sessionUnavailable(lastError)
+      // A store that is starting, or whose database is still locked, answers
+      // exactly like this at login and works a moment later. Asking again is
+      // what turns that into a mailbox that comes up on its own.
+      scheduleSecretRetry()
       return
     }
+    stopSecretRetry()
     passwordChecked = true
     var value = String(line || "")
     if (value === "") {
@@ -230,6 +257,10 @@ Item {
     pendingPassword = ""
     passwordChecked = true
     lastError = ""
+    // A password the server just accepted needs no keyring lookup: stop any
+    // retry scheduled while the store was unreachable, so a late one cannot
+    // report the mailbox as unavailable over a working sign-in.
+    stopSecretRetry()
     storePassword()
     loginSucceeded()
   }
@@ -279,6 +310,7 @@ Item {
   // that has started rejecting it should not be asked a hundred more times
   // with the same value.
   function invalidateAccessToken() {
+    stopSecretRetry()
     password = ""
     passwordChecked = false
   }
@@ -303,6 +335,7 @@ Item {
     // is what stops an account rename from leaving the previous account's
     // credential in front of the new one's server.
     abandonSignIn()
+    stopSecretRetry()
     password = ""
     passwordChecked = false
     lookupHandled = false
