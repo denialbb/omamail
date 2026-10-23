@@ -215,6 +215,7 @@ Item {
       if (configured) sessionUnavailable("Sign in to this mailbox")
       return
     }
+    lastError = ""
     password = value
     finishWaiters(settings.username + ":" + password, "")
     loginSucceeded()

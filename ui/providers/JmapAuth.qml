@@ -263,6 +263,7 @@ Item {
       if (configured) sessionUnavailable("Sign in to this mailbox")
       return
     }
+    lastError = ""
     secret = value
     finishWaiters(credential(), "")
     loginSucceeded()

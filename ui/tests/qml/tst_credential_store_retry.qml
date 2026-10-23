@@ -116,6 +116,7 @@ Item {
       tryVerify(function() { return auth.loggedIn }, 1000)
       verify(store.lookups >= 2)
       compare(auth.password, "app-password")
+      compare(auth.lastError, "")
       compare(auth.recoveringSession, false)
       compare(auth.secretRetryAttempt, 0)
     }
@@ -134,6 +135,7 @@ Item {
       tryVerify(function() { return auth.loggedIn }, 1000)
       verify(store.lookups >= 2)
       compare(auth.secret, "app-password")
+      compare(auth.lastError, "")
       compare(auth.recoveringSession, false)
       compare(auth.secretRetryAttempt, 0)
     }
