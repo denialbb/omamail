@@ -222,6 +222,33 @@ Item {
       compare(auth.lastError, "Server rejected password")
     }
 
+    function test_account_change_cancels_retry_and_discards_stale_callback() {
+      var auth = createTemporaryObject(imapFactory, root)
+      verify(auth)
+      loginSpy.target = auth
+
+      auth.restoreSession()
+      compare(store.lookups, 1)
+      compare(auth.loggedIn, false)
+      compare(auth.recoveringSession, true)
+      compare(auth.secretRetryAttempt, 1)
+
+      // Account changes while retry is scheduled
+      auth.accountId = "imap:two@example.org"
+      compare(auth.secretRetryAttempt, 0)
+      compare(auth.password, "")
+      compare(auth.loggedIn, false)
+
+      // Keyring unlocks later; previous retry timer was cancelled, so no lookup fires
+      store.available = true
+      store.value = "stale-password"
+      wait(150)
+
+      compare(auth.password, "")
+      compare(auth.loggedIn, false)
+      compare(loginSpy.count, 0)
+    }
+
     function test_backend_not_ready_delays_lookup_until_ready() {
       backendMock.ready = false
       var auth = createTemporaryObject(imapWithBackendFactory, root)
