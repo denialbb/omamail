@@ -258,14 +258,8 @@ async fn close(connection: zbus::Connection) {
     let _ = tokio::time::timeout(CLOSE_DEADLINE, connection.close()).await;
 }
 
-async fn collection_locked(service: &SecretService<'_>) -> bool {
-    if let Ok(collections) = service.get_all_collections().await {
-        for collection in collections {
-            if collection.is_locked().await.unwrap_or(false) {
-                return true;
-            }
-        }
-    } else if let Ok(default) = service.get_default_collection().await {
+async fn default_collection_locked(service: &SecretService<'_>) -> bool {
+    if let Ok(default) = service.get_default_collection().await {
         if default.is_locked().await.unwrap_or(false) {
             return true;
         }
@@ -278,9 +272,6 @@ async fn find<'a>(
     attrs: &HashMap<String, String>,
     operation: Operation<'_>,
 ) -> Result<Option<::secret_service::Item<'a>>, Fault> {
-    if matches!(operation, Operation::Get) && collection_locked(service).await {
-        return Err(Fault::Answer(Error::Unavailable));
-    }
     let result = service
         .search_items(
             attrs
@@ -300,13 +291,13 @@ async fn find<'a>(
             .map_err(|_| Fault::Answer(Error::Unavailable))?;
         return Ok(Some(item));
     }
-    if matches!(operation, Operation::Get)
-        && result.unlocked.is_empty()
-        && collection_locked(service).await
-    {
+    if let Some(item) = result.unlocked.into_iter().next() {
+        return Ok(Some(item));
+    }
+    if matches!(operation, Operation::Get) && default_collection_locked(service).await {
         return Err(Fault::Answer(Error::Unavailable));
     }
-    Ok(result.unlocked.into_iter().next())
+    Ok(None)
 }
 
 async fn execute(

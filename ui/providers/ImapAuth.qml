@@ -258,6 +258,8 @@ Item {
     lastError = ""
     sessionGeneration++
     credentialLookupSerial++
+    credentialLookupBusy = false
+    finishWaiters("", "Manual sign-in in progress")
     if (password !== "") replacementBusy = true
     else loginBusy = true
     pendingPassword = value
@@ -343,6 +345,9 @@ Item {
   function invalidateAccessToken() {
     stopSecretRetry()
     restoreOwed = false
+    credentialLookupSerial++
+    credentialLookupBusy = false
+    finishWaiters("", "Session invalidated")
     password = ""
     passwordChecked = false
   }

@@ -1,4 +1,3 @@
-pragma ComponentBehavior: Bound
 import QtQuick
 import QtTest
 import "../../providers" as Providers
@@ -18,14 +17,30 @@ Item {
     property string errorCode: "credential_store_unavailable"
     property string value: "app-password"
     property int lookups: 0
+    property var pendingCallback: null
+    property bool delayed: false
     function reset() {
       available = false
       errorCode = "credential_store_unavailable"
       value = "app-password"
       lookups = 0
+      pendingCallback = null
+      delayed = false
+    }
+    function triggerPending() {
+      if (typeof pendingCallback === "function") {
+        var cb = pendingCallback
+        pendingCallback = null
+        if (!available) cb("", errorCode)
+        else cb(value, "")
+      }
     }
     function credentialGet(kind, accountId, clientId, callback) {
       lookups++
+      if (delayed) {
+        pendingCallback = callback
+        return true
+      }
       if (!available) {
         callback("", errorCode)
         return true
@@ -261,6 +276,82 @@ Item {
       // Backend comes up
       backendMock.ready = true
       compare(store.lookups, 1)
+    }
+
+    function test_manual_signin_supersedes_in_flight_lookup_and_clears_busy() {
+      store.delayed = true
+      var auth = createTemporaryObject(imapFactory, root)
+      verify(auth)
+
+      var waiterCalled = false
+      var waiterError = ""
+      auth.withCredentials(function(creds, err) {
+        waiterCalled = true
+        waiterError = err
+      })
+
+      auth.restoreSession()
+      compare(store.lookups, 1)
+      verify(store.pendingCallback !== null)
+
+      var started = auth.signIn("typed-password")
+      verify(started)
+      compare(auth.loginBusy, true)
+      verify(waiterCalled)
+      compare(waiterError, "Manual sign-in in progress")
+
+      store.triggerPending()
+      compare(auth.password, "")
+
+      auth.completeSignIn(false, "Server rejected password")
+      compare(auth.loginBusy, false)
+      compare(auth.lastError, "Server rejected password")
+
+      store.delayed = false
+      store.available = true
+      store.value = "saved-password"
+      auth.restoreSession()
+      compare(store.lookups, 2)
+      compare(auth.password, "saved-password")
+      compare(auth.loggedIn, true)
+    }
+
+    function test_jmap_manual_signin_supersedes_in_flight_lookup_and_clears_busy() {
+      store.delayed = true
+      var auth = createTemporaryObject(jmapFactory, root)
+      verify(auth)
+
+      var waiterCalled = false
+      var waiterError = ""
+      auth.withCredentials(function(creds, err) {
+        waiterCalled = true
+        waiterError = err
+      })
+
+      auth.restoreSession()
+      compare(store.lookups, 1)
+      verify(store.pendingCallback !== null)
+
+      var started = auth.signIn("typed-token", "one@example.org")
+      verify(started)
+      compare(auth.loginBusy, true)
+      verify(waiterCalled)
+      compare(waiterError, "Manual sign-in in progress")
+
+      store.triggerPending()
+      compare(auth.secret, "")
+
+      auth.completeSignIn(false, null, "Unauthorized", false)
+      compare(auth.loginBusy, false)
+      compare(auth.lastError, "Unauthorized")
+
+      store.delayed = false
+      store.available = true
+      store.value = "saved-token"
+      auth.restoreSession()
+      compare(store.lookups, 2)
+      compare(auth.secret, "saved-token")
+      compare(auth.loggedIn, true)
     }
   }
 }

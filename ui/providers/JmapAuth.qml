@@ -298,6 +298,8 @@ Item {
     lastError = ""
     serverNeeded = false
     credentialLookupSerial++
+    credentialLookupBusy = false
+    finishWaiters(null, "Manual sign-in in progress")
     loginBusy = true
     pendingSecret = typed
     verifyRequested(settings, address, typed)
@@ -394,6 +396,9 @@ Item {
   function invalidateAccessToken() {
     stopSecretRetry()
     restoreOwed = false
+    credentialLookupSerial++
+    credentialLookupBusy = false
+    finishWaiters(null, "Session invalidated")
     secret = ""
     secretChecked = false
   }
